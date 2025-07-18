@@ -155,7 +155,7 @@ curl https://your-worker-url/health
 
 ## License
 
-MIT License - feel free to use, modify, and distribute.
+This project is licensed under the GNU General Public License v2 or later - see the [GPL License](https://www.gnu.org/licenses/gpl-3.0.en.html#license-text) for details.
 
 ## Contributing
 
