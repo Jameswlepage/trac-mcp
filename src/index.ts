@@ -1111,17 +1111,29 @@ export default {
     
     // Generate OG image
     if (url.pathname === "/og-image.png") {
-      const title = url.searchParams.get("title") || "WordPress Trac MCP Server";
-      const subtitle = url.searchParams.get("subtitle") || "Model Context Protocol server for WordPress.org Trac integration";
+      const title = (url.searchParams.get("title") || "WordPress Trac MCP Server")
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      const subtitle = (url.searchParams.get("subtitle") || "Model Context Protocol server for WordPress.org Trac integration")
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
       
       // Create a WordPress-branded OG image
       const svg = `
         <svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
           <defs>
             <style>
-              @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;500;700&display=swap');
-              .title { font-family: 'EB Garamond', serif; font-size: 48px; font-weight: 700; fill: white; }
-              .subtitle { font-family: 'EB Garamond', serif; font-size: 24px; font-weight: 400; fill: rgba(255,255,255,0.9); }
+              <![CDATA[
+                @import url('https://fonts.googleapis.com/css2?family=EB+Garamond:wght@400;500;700&display=swap');
+                .title { font-family: 'EB Garamond', serif; font-size: 48px; font-weight: 700; fill: white; }
+                .subtitle { font-family: 'EB Garamond', serif; font-size: 24px; font-weight: 400; fill: rgba(255,255,255,0.9); }
+              ]]>
             </style>
           </defs>
           
