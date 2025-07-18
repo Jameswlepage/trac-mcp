@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-// WordPress Trac XML-RPC endpoint
-const TRAC_XMLRPC_URL = "https://core.trac.wordpress.org/login/xmlrpc";
+// WordPress Trac public API endpoints
+const TRAC_BASE_URL = "https://core.trac.wordpress.org";
 
 
 // JSON-RPC 2.0 message schemas
@@ -139,8 +139,7 @@ class TracXmlRpcClient {
   }
 }
 
-// Initialize Trac client
-const tracClient = new TracXmlRpcClient(TRAC_XMLRPC_URL);
+// No client initialization needed - using public HTTP APIs
 
 /**
  * Handle MCP JSON-RPC 2.0 requests
@@ -295,77 +294,72 @@ async function handleMcpRequest(request: any): Promise<any> {
           case "searchTickets": {
             const { query, limit = 10, status, component } = args;
             
-            // Build Trac query filter
-            let filter = '';
-            
-            // Add keyword search
-            if (query.includes('=') || query.includes('~')) {
-              // User provided a direct filter
-              filter = query;
-            } else {
-              // Search in summary and description
-              filter = `summary~=${query}|description~=${query}`;
-            }
-            
-            // Add status filter
-            if (status) {
-              filter += `&status=${status}`;
-            }
-            
-            // Add component filter
-            if (component) {
-              filter += `&component=${component}`;
-            }
+            try {
+              // Build Trac query URL
+              const queryUrl = new URL('https://core.trac.wordpress.org/query');
+              queryUrl.searchParams.set('format', 'csv');
+              queryUrl.searchParams.set('max', Math.min(limit, 50).toString());
+              
+              // Add keyword search
+              if (query.includes('=') || query.includes('~')) {
+                // User provided a direct filter
+                queryUrl.searchParams.set('summary', query);
+              } else {
+                // Search in summary
+                queryUrl.searchParams.set('summary', `~${query}`);
+              }
+              
+              // Add status filter
+              if (status) {
+                queryUrl.searchParams.set('status', status);
+              }
+              
+              // Add component filter
+              if (component) {
+                queryUrl.searchParams.set('component', component);
+              }
 
-            // Query tickets
-            const ticketIds = await tracClient.call('ticket.query', [filter]);
-            
-            // Limit results
-            const limitedIds = ticketIds.slice(0, Math.min(limit, 50));
-            
-            // Get ticket details
-            const tickets = await Promise.all(
-              limitedIds.map(async (ticketId: number) => {
-                try {
-                  const ticketData = await tracClient.call('ticket.get', [ticketId]);
-                  const attrs = ticketData[3] || {};
-                  
-                  const ticket = {
-                    id: ticketId,
-                    title: attrs.summary || '',
-                    text: `#${ticketId}: ${attrs.summary || 'No summary'}\nStatus: ${attrs.status || 'unknown'}\nComponent: ${attrs.component || 'unknown'}\nType: ${attrs.type || 'unknown'}\nPriority: ${attrs.priority || 'unknown'}`,
-                    url: `https://core.trac.wordpress.org/ticket/${ticketId}`,
-                    metadata: {
-                      status: attrs.status || 'unknown',
-                      component: attrs.component || 'unknown',
-                      priority: attrs.priority || 'unknown',
-                      milestone: attrs.milestone || '',
-                      type: attrs.type || 'unknown',
-                    },
-                  };
-                  
-                  // Cache for later use
-                  ticketCache.set(ticketId, ticket);
-                  
-                  return ticket;
-                } catch (error) {
-                  return {
-                    id: ticketId,
-                    title: `Error loading ticket ${ticketId}`,
-                    text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                    url: `https://core.trac.wordpress.org/ticket/${ticketId}`,
-                    metadata: { status: 'error' },
-                  };
-                }
-              })
-            );
+              // Query tickets
+              const response = await fetch(queryUrl.toString());
+              const csvData = await response.text();
+              
+              // Parse CSV data
+              const lines = csvData.trim().split('\n');
+              const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+              const tickets = [];
+              
+              for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
+                const ticket = {
+                  id: parseInt(values[0]),
+                  title: values[1] || '',
+                  text: `#${values[0]}: ${values[1] || 'No summary'}\nStatus: ${values[2] || 'unknown'}\nOwner: ${values[3] || 'unassigned'}\nType: ${values[4] || 'unknown'}\nPriority: ${values[5] || 'unknown'}\nMilestone: ${values[6] || 'none'}`,
+                  url: `https://core.trac.wordpress.org/ticket/${values[0]}`,
+                  metadata: {
+                    status: values[2] || 'unknown',
+                    owner: values[3] || 'unassigned',
+                    type: values[4] || 'unknown',
+                    priority: values[5] || 'unknown',
+                    milestone: values[6] || 'none',
+                  },
+                };
+                
+                tickets.push(ticket);
+              }
 
-            result = {
-              results: tickets,
-              query,
-              totalFound: ticketIds.length,
-              returned: tickets.length,
-            };
+              result = {
+                results: tickets,
+                query,
+                totalFound: tickets.length,
+                returned: tickets.length,
+              };
+            } catch (error) {
+              result = {
+                results: [],
+                query,
+                error: error instanceof Error ? error.message : 'Unknown error',
+              };
+            }
             break;
           }
 
@@ -373,42 +367,51 @@ async function handleMcpRequest(request: any): Promise<any> {
             const { id, includeComments = true, commentLimit = 10 } = args;
             
             try {
-              // Get ticket details
-              const ticketData = await tracClient.call('ticket.get', [id]);
-              const attrs = ticketData[3] || {};
+              // Get ticket details from CSV API
+              const ticketUrl = `https://core.trac.wordpress.org/ticket/${id}?format=csv`;
+              const response = await fetch(ticketUrl);
+              const csvData = await response.text();
+              
+              // Parse CSV data
+              const lines = csvData.trim().split('\n');
+              if (lines.length < 2) {
+                throw new Error(`Ticket ${id} not found`);
+              }
+              
+              const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+              const values = lines[1].split(',').map(v => v.replace(/"/g, '').trim());
               
               const ticket = {
-                id,
-                summary: attrs.summary || '',
-                description: attrs.description || '',
-                status: attrs.status || '',
-                resolution: attrs.resolution || '',
-                priority: attrs.priority || '',
-                component: attrs.component || '',
-                milestone: attrs.milestone || '',
-                version: attrs.version || '',
-                reporter: attrs.reporter || '',
-                owner: attrs.owner || '',
-                cc: attrs.cc || '',
-                keywords: attrs.keywords || '',
-                type: attrs.type || '',
-                created: attrs.time ? new Date(attrs.time * 1000).toISOString() : '',
-                modified: attrs.changetime ? new Date(attrs.changetime * 1000).toISOString() : '',
+                id: parseInt(values[0]),
+                summary: values[1] || '',
+                reporter: values[2] || '',
+                owner: values[3] || '',
+                description: values[4] || '',
+                type: values[5] || '',
+                status: values[6] || '',
+                priority: values[7] || '',
+                milestone: values[8] || '',
+                component: values[9] || '',
+                version: values[10] || '',
+                severity: values[11] || '',
+                resolution: values[12] || '',
+                keywords: values[13] || '',
+                cc: values[14] || '',
+                focuses: values[15] || '',
               };
 
-              let comments = [];
+              // Note: Comments are not available through the CSV API
+              // We would need to scrape the HTML page for comments
+              let comments: any[] = [];
               
               if (includeComments) {
                 try {
-                  const changelog = await tracClient.call('ticket.changeLog', [id]);
-                  comments = changelog
-                    .filter((change: any[]) => change[2] === 'comment' && change[4])
-                    .slice(0, Math.min(commentLimit, 50))
-                    .map((change: any[]) => ({
-                      author: change[1] || 'anonymous',
-                      timestamp: change[0] ? new Date(change[0] * 1000).toISOString() : '',
-                      comment: change[4] || '',
-                    }));
+                  // For now, indicate that comments require HTML scraping
+                  comments = [{
+                    author: 'system',
+                    timestamp: new Date().toISOString(),
+                    comment: 'Comment history not available through CSV API. Visit the ticket URL for full discussion.',
+                  }];
                 } catch (error) {
                   console.warn('Failed to load comments:', error);
                 }
@@ -417,7 +420,7 @@ async function handleMcpRequest(request: any): Promise<any> {
               result = {
                 id: id,
                 title: `#${id}: ${ticket.summary}`,
-                text: `Ticket #${id}: ${ticket.summary}\n\nStatus: ${ticket.status}\nComponent: ${ticket.component}\nPriority: ${ticket.priority}\nType: ${ticket.type}\nReporter: ${ticket.reporter}\nOwner: ${ticket.owner}\n\nDescription:\n${ticket.description}\n\n${comments.length > 0 ? `Comments (${comments.length}):\n${comments.map((c: any) => `${c.author}: ${c.comment}`).join('\n\n')}` : 'No comments'}`,
+                text: `Ticket #${id}: ${ticket.summary}\n\nStatus: ${ticket.status}\nComponent: ${ticket.component}\nPriority: ${ticket.priority}\nType: ${ticket.type}\nReporter: ${ticket.reporter}\nOwner: ${ticket.owner}\nMilestone: ${ticket.milestone}\nVersion: ${ticket.version}\nKeywords: ${ticket.keywords}\n\nDescription:\n${ticket.description}\n\nFor full discussion and comments, visit: https://core.trac.wordpress.org/ticket/${id}`,
                 url: `https://core.trac.wordpress.org/ticket/${id}`,
                 metadata: {
                   ticket,
@@ -555,16 +558,18 @@ async function handleMcpRequest(request: any): Promise<any> {
                   const linkMatch = itemMatch.match(/<link>(.*?)<\/link>/);
                   const descMatch = itemMatch.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/);
                   const dateMatch = itemMatch.match(/<pubDate>(.*?)<\/pubDate>/);
+                  const creatorMatch = itemMatch.match(/<dc:creator>(.*?)<\/dc:creator>/);
                   
                   if (titleMatch && linkMatch) {
                     events.push({
                       id: linkMatch[1],
                       title: titleMatch[1],
-                      text: `${titleMatch[1]}\n\n${descMatch ? descMatch[1] : ''}\n\nDate: ${dateMatch ? dateMatch[1] : 'Unknown'}`,
+                      text: `${titleMatch[1]}\n\nAuthor: ${creatorMatch ? creatorMatch[1] : 'Unknown'}\nDate: ${dateMatch ? dateMatch[1] : 'Unknown'}\n\n${descMatch ? descMatch[1].replace(/<[^>]*>/g, '') : ''}`,
                       url: linkMatch[1],
                       metadata: {
                         date: dateMatch ? dateMatch[1] : '',
-                        description: descMatch ? descMatch[1] : '',
+                        author: creatorMatch ? creatorMatch[1] : '',
+                        description: descMatch ? descMatch[1].replace(/<[^>]*>/g, '') : '',
                       },
                     });
                   }
@@ -591,40 +596,75 @@ async function handleMcpRequest(request: any): Promise<any> {
             
             try {
               let data: any = {};
+              let uniqueValues = new Set<string>();
               
+              // Get a sample of tickets to extract unique values for the requested field
+              const queryUrl = new URL('https://core.trac.wordpress.org/query');
+              queryUrl.searchParams.set('format', 'csv');
+              queryUrl.searchParams.set('max', '1000'); // Get more tickets for better coverage
+              
+              const response = await fetch(queryUrl.toString());
+              const csvData = await response.text();
+              
+              // Parse CSV data
+              const lines = csvData.trim().split('\n');
+              const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+              
+              // Find the column index for the requested type
+              let columnIndex = -1;
               switch (type) {
                 case "components":
-                  data = await tracClient.call('ticket.component.getAll', []);
+                  columnIndex = headers.indexOf('Component');
                   break;
                 case "milestones":
-                  data = await tracClient.call('ticket.milestone.getAll', []);
+                  columnIndex = headers.indexOf('Milestone');
                   break;
                 case "priorities":
-                  data = await tracClient.call('ticket.priority.getAll', []);
+                  columnIndex = headers.indexOf('Priority');
                   break;
                 case "severities":
-                  data = await tracClient.call('ticket.severity.getAll', []);
+                  columnIndex = headers.indexOf('Severity');
+                  break;
+                case "types":
+                  columnIndex = headers.indexOf('Type');
+                  break;
+                case "statuses":
+                  columnIndex = headers.indexOf('Status');
                   break;
                 default:
-                  throw new Error(`Unknown info type: ${type}`);
+                  throw new Error(`Unknown info type: ${type}. Available types: components, milestones, priorities, severities, types, statuses`);
               }
+              
+              if (columnIndex === -1) {
+                throw new Error(`Column not found for type: ${type}`);
+              }
+              
+              // Extract unique values
+              for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
+                if (values[columnIndex] && values[columnIndex].trim()) {
+                  uniqueValues.add(values[columnIndex].trim());
+                }
+              }
+              
+              data = Array.from(uniqueValues).sort();
 
               result = {
                 id: type,
                 title: `WordPress Trac ${type}`,
-                text: `${type.charAt(0).toUpperCase() + type.slice(1)} available in WordPress Trac:\n\n${Array.isArray(data) ? data.join('\n') : JSON.stringify(data, null, 2)}`,
+                text: `${type.charAt(0).toUpperCase() + type.slice(1)} available in WordPress Trac:\n\n${data.join('\n')}`,
                 url: 'https://core.trac.wordpress.org/',
                 metadata: {
                   type,
                   data,
-                  total: Array.isArray(data) ? data.length : Object.keys(data).length,
+                  total: data.length,
                 },
               };
             } catch (error) {
               result = {
                 id: type,
                 title: `Error loading ${type}`,
-                text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}. Available types: components, milestones, priorities, severities, types, statuses`,
                 url: 'https://core.trac.wordpress.org/',
                 metadata: { error: true },
               };
