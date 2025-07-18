@@ -512,67 +512,103 @@ async function handleMcpRequest(request: any): Promise<any> {
             const { id, includeComments = true, commentLimit = 10 } = args;
             
             try {
-              // Get ticket details from CSV API
-              const ticketUrl = `https://core.trac.wordpress.org/ticket/${id}?format=csv`;
-              const response = await fetch(ticketUrl);
+              // Use search approach since CSV parsing is problematic
+              const searchUrl = new URL('https://core.trac.wordpress.org/query');
+              searchUrl.searchParams.set('format', 'csv');
+              searchUrl.searchParams.set('id', id.toString());
+              searchUrl.searchParams.set('max', '1');
+              
+              const response = await fetch(searchUrl.toString());
               const csvData = await response.text();
               
-              // Parse CSV data
-              const lines = csvData.trim().split('\n');
+              // Parse CSV data similar to searchTickets
+              const lines = csvData.replace(/^\uFEFF/, '').trim().split(/\r?\n/);
               if (lines.length < 2) {
                 throw new Error(`Ticket ${id} not found`);
               }
               
               const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
-              const values = lines[1].split(',').map(v => v.replace(/"/g, '').trim());
               
-              const ticket = {
-                id: parseInt(values[0]),
-                summary: values[1] || '',
-                reporter: values[2] || '',
-                owner: values[3] || '',
-                description: values[4] || '',
-                type: values[5] || '',
-                status: values[6] || '',
-                priority: values[7] || '',
-                milestone: values[8] || '',
-                component: values[9] || '',
-                version: values[10] || '',
-                severity: values[11] || '',
-                resolution: values[12] || '',
-                keywords: values[13] || '',
-                cc: values[14] || '',
-                focuses: values[15] || '',
-              };
+              // Parse each line like in searchTickets
+              for (let i = 1; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                // Simple CSV parsing - handle quoted fields
+                const values = [];
+                let currentField = '';
+                let inQuotes = false;
+                
+                for (let j = 0; j < line.length; j++) {
+                  const char = line[j];
+                  if (char === '"' && (j === 0 || line[j-1] === ',')) {
+                    inQuotes = true;
+                  } else if (char === '"' && inQuotes && (j === line.length - 1 || line[j+1] === ',')) {
+                    inQuotes = false;
+                  } else if (char === ',' && !inQuotes) {
+                    values.push(currentField.trim());
+                    currentField = '';
+                  } else {
+                    currentField += char;
+                  }
+                }
+                values.push(currentField.trim());
+                
+                if (values.length >= 2 && values[0] && !isNaN(parseInt(values[0]))) {
+                  const ticketId = parseInt(values[0]);
+                  if (ticketId === id) {
+                    // Map fields based on actual headers from search query
+                    // Headers: id,Summary,Owner,Type,Status,Priority,Milestone
+                    const ticket = {
+                      id: parseInt(values[0]),
+                      summary: values[1] || '',
+                      owner: values[2] || '',
+                      type: values[3] || '',
+                      status: values[4] || '',
+                      priority: values[5] || '',
+                      milestone: values[6] || '',
+                      reporter: '', // Not available in search query
+                      description: 'Full description not available in search query. Visit the ticket URL for complete details.',
+                      component: '', // Not available in search query
+                      version: '',
+                      severity: '',
+                      resolution: '',
+                      keywords: '',
+                      cc: '',
+                      focuses: '',
+                    };
 
-              // Note: Comments are not available through the CSV API
-              // We would need to scrape the HTML page for comments
-              let comments: any[] = [];
-              
-              if (includeComments) {
-                try {
-                  // For now, indicate that comments require HTML scraping
-                  comments = [{
-                    author: 'system',
-                    timestamp: new Date().toISOString(),
-                    comment: 'Comment history not available through CSV API. Visit the ticket URL for full discussion.',
-                  }];
-                } catch (error) {
-                  console.warn('Failed to load comments:', error);
+                    // Note: Comments are not available through the CSV API
+                    let comments: any[] = [];
+                    
+                    if (includeComments) {
+                      comments = [{
+                        author: 'system',
+                        timestamp: new Date().toISOString(),
+                        comment: 'Comment history not available through CSV API. Visit the ticket URL for full discussion.',
+                      }];
+                    }
+
+                    result = {
+                      id: id,
+                      title: `#${id}: ${ticket.summary}`,
+                      text: `Ticket #${id}: ${ticket.summary}\n\nStatus: ${ticket.status}\nComponent: ${ticket.component}\nPriority: ${ticket.priority}\nType: ${ticket.type}\nReporter: ${ticket.reporter}\nOwner: ${ticket.owner}\nMilestone: ${ticket.milestone}\nVersion: ${ticket.version}\nKeywords: ${ticket.keywords}\n\nDescription:\n${ticket.description}\n\nFor full discussion and comments, visit: https://core.trac.wordpress.org/ticket/${id}`,
+                      url: `https://core.trac.wordpress.org/ticket/${id}`,
+                      metadata: {
+                        ticket,
+                        comments,
+                        totalComments: comments.length,
+                      },
+                    };
+                    break; // Found the ticket, exit the loop
+                  }
                 }
               }
-
-              result = {
-                id: id,
-                title: `#${id}: ${ticket.summary}`,
-                text: `Ticket #${id}: ${ticket.summary}\n\nStatus: ${ticket.status}\nComponent: ${ticket.component}\nPriority: ${ticket.priority}\nType: ${ticket.type}\nReporter: ${ticket.reporter}\nOwner: ${ticket.owner}\nMilestone: ${ticket.milestone}\nVersion: ${ticket.version}\nKeywords: ${ticket.keywords}\n\nDescription:\n${ticket.description}\n\nFor full discussion and comments, visit: https://core.trac.wordpress.org/ticket/${id}`,
-                url: `https://core.trac.wordpress.org/ticket/${id}`,
-                metadata: {
-                  ticket,
-                  comments,
-                  totalComments: comments.length,
-                },
-              };
+              
+              // If we didn't find the ticket, result will be undefined
+              if (!result) {
+                throw new Error(`Ticket ${id} not found`);
+              }
             } catch (error) {
               result = {
                 id: id,
@@ -594,7 +630,7 @@ async function handleMcpRequest(request: any): Promise<any> {
               // Fetch changeset page
               const response = await fetch(changesetUrl, {
                 headers: {
-                  'User-Agent': 'WordPress-Trac-MCP-Server/1.0'
+                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
               });
 
@@ -604,10 +640,13 @@ async function handleMcpRequest(request: any): Promise<any> {
 
               const html = await response.text();
               
-              // Parse changeset information from HTML
-              const messageMatch = html.match(/<div class="message"[^>]*>\s*<p[^>]*>(.*?)<\/p>/s);
-              const authorMatch = html.match(/<dt>Author:<\/dt>\s*<dd>(.*?)<\/dd>/s);
-              const dateMatch = html.match(/<dt>Date:<\/dt>\s*<dd>(.*?)<\/dd>/s);
+              // Parse changeset information from HTML with better patterns
+              const messageMatch = html.match(/<div class="message"[^>]*>\s*<p[^>]*>(.*?)<\/p>/s) || 
+                                  html.match(/<div class="message"[^>]*>(.*?)<\/div>/s);
+              const authorMatch = html.match(/<dt>Author:<\/dt>\s*<dd>(.*?)<\/dd>/s) ||
+                                 html.match(/<dt class="author">Author:<\/dt>\s*<dd class="author">(.*?)<\/dd>/s);
+              const dateMatch = html.match(/<dt>Date:<\/dt>\s*<dd>(.*?)<\/dd>/s) ||
+                               html.match(/<dt class="date">Date:<\/dt>\s*<dd class="date">(.*?)<\/dd>/s);
               
               const changeset = {
                 revision,
@@ -618,15 +657,17 @@ async function handleMcpRequest(request: any): Promise<any> {
                 diff: '',
               };
 
-              // Extract file list
-              const fileMatches = html.match(/<h2[^>]*>Files:<\/h2>([\s\S]*?)<\/div>/);
+              // Extract file list with better patterns
+              const fileMatches = html.match(/<h2[^>]*>Files:<\/h2>([\s\S]*?)<\/div>/) ||
+                                 html.match(/<div class="files"[^>]*>([\s\S]*?)<\/div>/);
               if (fileMatches?.[1]) {
                 const fileListHtml = fileMatches[1];
-                const filePathMatches = fileListHtml.match(/<a[^>]*href="[^"]*"[^>]*>(.*?)<\/a>/g);
+                const filePathMatches = fileListHtml.match(/<a[^>]*href="[^"]*"[^>]*>(.*?)<\/a>/g) ||
+                                       fileListHtml.match(/<li[^>]*>(.*?)<\/li>/g);
                 if (filePathMatches) {
                   changeset.files = filePathMatches
                     .map(match => match.replace(/<[^>]*>/g, '').trim())
-                    .filter(path => path);
+                    .filter(path => path && !path.includes('('));
                 }
               }
 
@@ -636,7 +677,7 @@ async function handleMcpRequest(request: any): Promise<any> {
                   const diffUrl = `${changesetUrl}?format=diff`;
                   const diffResponse = await fetch(diffUrl, {
                     headers: {
-                      'User-Agent': 'WordPress-Trac-MCP-Server/1.0'
+                      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                     }
                   });
 
@@ -683,7 +724,7 @@ async function handleMcpRequest(request: any): Promise<any> {
               
               const response = await fetch(timelineUrl, {
                 headers: {
-                  'User-Agent': 'WordPress-Trac-MCP-Server/1.0'
+                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
                 }
               });
 
