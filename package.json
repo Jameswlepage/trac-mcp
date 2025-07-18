@@ -1,0 +1,53 @@
+{
+  "name": "wordpress-trac-mcp-server",
+  "version": "1.0.0",
+  "description": "Production-ready Model Context Protocol server for WordPress Trac integration on Cloudflare Workers",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev --compatibility-date 2024-09-23",
+    "start": "wrangler dev --compatibility-date 2024-09-23",
+    "deploy": "wrangler deploy --compatibility-date 2024-09-23",
+    "deploy:production": "wrangler deploy --env production --compatibility-date 2024-09-23",
+    "build": "echo 'Build handled by Wrangler'",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "lint:fix": "biome lint --apply .",
+    "type-check": "tsc --noEmit",
+    "cf-typegen": "wrangler types",
+    "test": "npm run type-check && npm run lint"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "wordpress",
+    "trac",
+    "cloudflare",
+    "workers",
+    "ai",
+    "llm"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "agents": "^0.0.108",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.8.3",
+    "@cloudflare/workers-types": "^4.20240529.0",
+    "typescript": "^5.4.5",
+    "wrangler": "^4.25.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/wordpress-trac-mcp-server"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/wordpress-trac-mcp-server/issues"
+  },
+  "homepage": "https://github.com/yourusername/wordpress-trac-mcp-server#readme"
+}
