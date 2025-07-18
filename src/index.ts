@@ -300,12 +300,13 @@ async function handleMcpRequest(request: any): Promise<any> {
               queryUrl.searchParams.set('format', 'csv');
               queryUrl.searchParams.set('max', Math.min(limit, 50).toString());
               
-              // Add keyword search
+              // Add keyword search - try different approaches
+              let searchApproach = 'summary';
               if (query.includes('=') || query.includes('~')) {
                 // User provided a direct filter
                 queryUrl.searchParams.set('summary', query);
               } else {
-                // Search in summary
+                // Search in summary with keyword
                 queryUrl.searchParams.set('summary', `~${query}`);
               }
               
@@ -319,32 +320,175 @@ async function handleMcpRequest(request: any): Promise<any> {
                 queryUrl.searchParams.set('component', component);
               }
 
-              // Query tickets
-              const response = await fetch(queryUrl.toString());
+              // Query tickets with proper headers
+              const response = await fetch(queryUrl.toString(), {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)',
+                  'Accept': 'text/csv,text/plain,*/*',
+                  'Accept-Language': 'en-US,en;q=0.9',
+                }
+              });
+              
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+              }
+              
               const csvData = await response.text();
               
+              // Check if we got HTML instead of CSV (403 error)
+              if (csvData.includes('<html>') || csvData.includes('403 Forbidden')) {
+                // Fallback: try without search parameters
+                const fallbackUrl = new URL('https://core.trac.wordpress.org/query');
+                fallbackUrl.searchParams.set('format', 'csv');
+                fallbackUrl.searchParams.set('max', Math.min(limit * 3, 100).toString()); // Get more to filter
+                
+                const fallbackResponse = await fetch(fallbackUrl.toString(), {
+                  headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)',
+                    'Accept': 'text/csv,text/plain,*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                  }
+                });
+                
+                if (!fallbackResponse.ok) {
+                  throw new Error(`Fallback query failed: ${fallbackResponse.status} ${fallbackResponse.statusText}`);
+                }
+                
+                const fallbackData = await fallbackResponse.text();
+                if (fallbackData.includes('<html>') || fallbackData.includes('403 Forbidden')) {
+                  throw new Error('Access denied - both search and fallback queries returned HTML');
+                }
+                
+                // Filter results client-side
+                const allLines = fallbackData.trim().split('\n');
+                const filteredLines = [allLines[0]]; // Keep header
+                
+                for (let i = 1; i < allLines.length; i++) {
+                  const line = allLines[i];
+                  if (line.toLowerCase().includes(query.toLowerCase())) {
+                    filteredLines.push(line);
+                    if (filteredLines.length > limit) break;
+                  }
+                }
+                
+                const result = { 
+                  csvData: filteredLines.join('\n'), 
+                  wasFiltered: true 
+                };
+                
+                // Parse CSV data
+                const lines = result.csvData.trim().split('\n');
+                if (lines.length < 2) {
+                  throw new Error('No tickets found matching search criteria');
+                }
+                
+                const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+                const tickets = [];
+                
+                for (let i = 1; i < lines.length; i++) {
+                  const line = lines[i].trim();
+                  if (!line) continue;
+                  
+                  // Simple CSV parsing - handle quoted fields
+                  const values = [];
+                  let currentField = '';
+                  let inQuotes = false;
+                  
+                  for (let j = 0; j < line.length; j++) {
+                    const char = line[j];
+                    if (char === '"' && (j === 0 || line[j-1] === ',')) {
+                      inQuotes = true;
+                    } else if (char === '"' && inQuotes && (j === line.length - 1 || line[j+1] === ',')) {
+                      inQuotes = false;
+                    } else if (char === ',' && !inQuotes) {
+                      values.push(currentField.trim());
+                      currentField = '';
+                    } else {
+                      currentField += char;
+                    }
+                  }
+                  values.push(currentField.trim());
+                  
+                  if (values.length >= 2 && values[0] && !isNaN(parseInt(values[0]))) {
+                    const ticket = {
+                      id: parseInt(values[0]),
+                      title: values[1] || '',
+                      text: `#${values[0]}: ${values[1] || 'No summary'}\nStatus: ${values[2] || 'unknown'}\nOwner: ${values[3] || 'unassigned'}\nType: ${values[4] || 'unknown'}\nPriority: ${values[5] || 'unknown'}\nMilestone: ${values[6] || 'none'}`,
+                      url: `https://core.trac.wordpress.org/ticket/${values[0]}`,
+                      metadata: {
+                        status: values[2] || 'unknown',
+                        owner: values[3] || 'unassigned',
+                        type: values[4] || 'unknown',
+                        priority: values[5] || 'unknown',
+                        milestone: values[6] || 'none',
+                      },
+                    };
+                    
+                    tickets.push(ticket);
+                  }
+                }
+
+                return {
+                  results: tickets,
+                  query,
+                  totalFound: tickets.length,
+                  returned: tickets.length,
+                  note: queryResult.wasFiltered ? 'Results filtered client-side due to search API limitations' : undefined,
+                };
+              }
+              
+              const queryResult = { csvData, wasFiltered: false };
+              
               // Parse CSV data
-              const lines = csvData.trim().split('\n');
+              const lines = queryResult.csvData.trim().split('\n');
+              if (lines.length < 2) {
+                throw new Error('No tickets found or invalid CSV response');
+              }
+              
               const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
               const tickets = [];
               
               for (let i = 1; i < lines.length; i++) {
-                const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
-                const ticket = {
-                  id: parseInt(values[0]),
-                  title: values[1] || '',
-                  text: `#${values[0]}: ${values[1] || 'No summary'}\nStatus: ${values[2] || 'unknown'}\nOwner: ${values[3] || 'unassigned'}\nType: ${values[4] || 'unknown'}\nPriority: ${values[5] || 'unknown'}\nMilestone: ${values[6] || 'none'}`,
-                  url: `https://core.trac.wordpress.org/ticket/${values[0]}`,
-                  metadata: {
-                    status: values[2] || 'unknown',
-                    owner: values[3] || 'unassigned',
-                    type: values[4] || 'unknown',
-                    priority: values[5] || 'unknown',
-                    milestone: values[6] || 'none',
-                  },
-                };
+                const line = lines[i].trim();
+                if (!line) continue;
                 
-                tickets.push(ticket);
+                // Simple CSV parsing - handle quoted fields
+                const values = [];
+                let currentField = '';
+                let inQuotes = false;
+                
+                for (let j = 0; j < line.length; j++) {
+                  const char = line[j];
+                  if (char === '"' && (j === 0 || line[j-1] === ',')) {
+                    inQuotes = true;
+                  } else if (char === '"' && inQuotes && (j === line.length - 1 || line[j+1] === ',')) {
+                    inQuotes = false;
+                  } else if (char === ',' && !inQuotes) {
+                    values.push(currentField.trim());
+                    currentField = '';
+                  } else {
+                    currentField += char;
+                  }
+                }
+                values.push(currentField.trim());
+                
+                if (values.length >= 2 && values[0] && !isNaN(parseInt(values[0]))) {
+                  const ticket = {
+                    id: parseInt(values[0]),
+                    title: values[1] || '',
+                    text: `#${values[0]}: ${values[1] || 'No summary'}\nStatus: ${values[4] || 'unknown'}\nOwner: ${values[2] || 'unassigned'}\nType: ${values[3] || 'unknown'}\nPriority: ${values[5] || 'unknown'}\nMilestone: ${values[6] || 'none'}`,
+                    url: `https://core.trac.wordpress.org/ticket/${values[0]}`,
+                    metadata: {
+                      status: values[4] || 'unknown',
+                      owner: values[2] || 'unassigned',
+                      type: values[3] || 'unknown',
+                      priority: values[5] || 'unknown',
+                      milestone: values[6] || 'none',
+                    },
+                  };
+                  
+                  tickets.push(ticket);
+                }
               }
 
               result = {
@@ -352,6 +496,7 @@ async function handleMcpRequest(request: any): Promise<any> {
                 query,
                 totalFound: tickets.length,
                 returned: tickets.length,
+                note: queryResult.wasFiltered ? 'Results filtered client-side due to search API limitations' : undefined,
               };
             } catch (error) {
               result = {
@@ -614,7 +759,8 @@ async function handleMcpRequest(request: any): Promise<any> {
               let columnIndex = -1;
               switch (type) {
                 case "components":
-                  columnIndex = headers.indexOf('Component');
+                  // Components are not in the default query, need different approach
+                  throw new Error(`Components list not available in default query. Try using the search function instead.`);
                   break;
                 case "milestones":
                   columnIndex = headers.indexOf('Milestone');
@@ -623,7 +769,8 @@ async function handleMcpRequest(request: any): Promise<any> {
                   columnIndex = headers.indexOf('Priority');
                   break;
                 case "severities":
-                  columnIndex = headers.indexOf('Severity');
+                  // Severities are not in the default query
+                  throw new Error(`Severities list not available in default query. Try using the search function instead.`);
                   break;
                 case "types":
                   columnIndex = headers.indexOf('Type');
@@ -632,7 +779,7 @@ async function handleMcpRequest(request: any): Promise<any> {
                   columnIndex = headers.indexOf('Status');
                   break;
                 default:
-                  throw new Error(`Unknown info type: ${type}. Available types: components, milestones, priorities, severities, types, statuses`);
+                  throw new Error(`Unknown info type: ${type}. Available types: milestones, priorities, types, statuses`);
               }
               
               if (columnIndex === -1) {
