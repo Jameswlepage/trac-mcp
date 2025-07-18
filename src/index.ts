@@ -434,7 +434,7 @@ async function handleMcpRequest(request: any): Promise<any> {
                   query,
                   totalFound: tickets.length,
                   returned: tickets.length,
-                  note: queryResult.wasFiltered ? 'Results filtered client-side due to search API limitations' : undefined,
+                  note: result.wasFiltered ? 'Results filtered client-side due to search API limitations' : undefined,
                 };
               }
               
@@ -519,7 +519,17 @@ async function handleMcpRequest(request: any): Promise<any> {
               searchUrl.searchParams.set('id', id.toString());
               searchUrl.searchParams.set('max', '1');
               
-              const response = await fetch(searchUrl.toString());
+              const response = await fetch(searchUrl.toString(), {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)',
+                  'Accept': 'text/csv,text/plain,*/*',
+                }
+              });
+              
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+              }
+              
               const csvData = await response.text();
               
               // Parse CSV data similar to searchTickets
@@ -535,17 +545,38 @@ async function handleMcpRequest(request: any): Promise<any> {
                 const line = lines[i].trim();
                 if (!line) continue;
                 
-                // Simple CSV parsing - handle quoted fields
+                // Better CSV parsing - handle quoted fields properly
                 const values = [];
                 let currentField = '';
                 let inQuotes = false;
+                let escapeNext = false;
                 
                 for (let j = 0; j < line.length; j++) {
                   const char = line[j];
-                  if (char === '"' && (j === 0 || line[j-1] === ',')) {
-                    inQuotes = true;
-                  } else if (char === '"' && inQuotes && (j === line.length - 1 || line[j+1] === ',')) {
-                    inQuotes = false;
+                  
+                  if (escapeNext) {
+                    currentField += char;
+                    escapeNext = false;
+                    continue;
+                  }
+                  
+                  if (char === '\\') {
+                    escapeNext = true;
+                    continue;
+                  }
+                  
+                  if (char === '"') {
+                    if (inQuotes) {
+                      // Check if this is an escaped quote
+                      if (j + 1 < line.length && line[j + 1] === '"') {
+                        currentField += '"';
+                        j++; // Skip the next quote
+                      } else {
+                        inQuotes = false;
+                      }
+                    } else {
+                      inQuotes = true;
+                    }
                   } else if (char === ',' && !inQuotes) {
                     values.push(currentField.trim());
                     currentField = '';
@@ -641,13 +672,17 @@ async function handleMcpRequest(request: any): Promise<any> {
 
               const html = await response.text();
               
-              // Parse changeset information from HTML with better patterns
-              const messageMatch = html.match(/<div class="message"[^>]*>\s*<p[^>]*>(.*?)<\/p>/s) || 
+              // Parse changeset information from HTML with improved patterns
+              const messageMatch = html.match(/<dd class="message[^"]*"[^>]*>\s*<p[^>]*>(.*?)<\/p>/s) || 
+                                  html.match(/<dd class="message[^"]*"[^>]*>(.*?)<\/dd>/s) ||
+                                  html.match(/<div class="message"[^>]*>\s*<p[^>]*>(.*?)<\/p>/s) || 
                                   html.match(/<div class="message"[^>]*>(.*?)<\/div>/s);
-              const authorMatch = html.match(/<dt>Author:<\/dt>\s*<dd>(.*?)<\/dd>/s) ||
-                                 html.match(/<dt class="author">Author:<\/dt>\s*<dd class="author">(.*?)<\/dd>/s);
-              const dateMatch = html.match(/<dt>Date:<\/dt>\s*<dd>(.*?)<\/dd>/s) ||
-                               html.match(/<dt class="date">Date:<\/dt>\s*<dd class="date">(.*?)<\/dd>/s);
+              const authorMatch = html.match(/<dd class="author"[^>]*><span class="trac-author"[^>]*>(.*?)<\/span><\/dd>/s) ||
+                                 html.match(/<dt class="property author">Author:<\/dt>\s*<dd class="author">(.*?)<\/dd>/s) ||
+                                 html.match(/<dt>Author:<\/dt>\s*<dd>(.*?)<\/dd>/s);
+              const dateMatch = html.match(/<dd class="date"[^>]*>(.*?)<\/dd>/s) ||
+                               html.match(/<dt class="property date">Date:<\/dt>\s*<dd class="date">(.*?)<\/dd>/s) ||
+                               html.match(/<dt>Date:<\/dt>\s*<dd>(.*?)<\/dd>/s);
               
               const changeset = {
                 revision,
@@ -658,17 +693,20 @@ async function handleMcpRequest(request: any): Promise<any> {
                 diff: '',
               };
 
-              // Extract file list with better patterns
+              // Extract file list with improved patterns
               const fileMatches = html.match(/<h2[^>]*>Files:<\/h2>([\s\S]*?)<\/div>/) ||
-                                 html.match(/<div class="files"[^>]*>([\s\S]*?)<\/div>/);
+                                 html.match(/<div class="files"[^>]*>([\s\S]*?)<\/div>/) ||
+                                 html.match(/<div[^>]*class="[^"]*files[^"]*"[^>]*>([\s\S]*?)<\/div>/);
               if (fileMatches?.[1]) {
                 const fileListHtml = fileMatches[1];
-                const filePathMatches = fileListHtml.match(/<a[^>]*href="[^"]*"[^>]*>(.*?)<\/a>/g) ||
+                const filePathMatches = fileListHtml.match(/<a[^>]*href="[^"]*\/browser\/[^"]*"[^>]*>(.*?)<\/a>/g) ||
+                                       fileListHtml.match(/<a[^>]*href="[^"]*"[^>]*>(.*?)<\/a>/g) ||
                                        fileListHtml.match(/<li[^>]*>(.*?)<\/li>/g);
                 if (filePathMatches) {
                   changeset.files = filePathMatches
                     .map(match => match.replace(/<[^>]*>/g, '').trim())
-                    .filter(path => path && !path.includes('('));
+                    .filter(path => path && !path.includes('(') && !path.includes('modified') && !path.includes('added') && !path.includes('deleted'))
+                    .slice(0, 20); // Limit to first 20 files
                 }
               }
 
@@ -735,28 +773,43 @@ async function handleMcpRequest(request: any): Promise<any> {
 
               const rssText = await response.text();
               
-              // Simple RSS parsing
+              // Better RSS parsing with multiple pattern attempts
               const itemMatches = rssText.match(/<item>([\s\S]*?)<\/item>/g);
               const events = [];
               
               if (itemMatches) {
                 for (const itemMatch of itemMatches) {
-                  const titleMatch = itemMatch.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/);
-                  const linkMatch = itemMatch.match(/<link>(.*?)<\/link>/);
-                  const descMatch = itemMatch.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/);
-                  const dateMatch = itemMatch.match(/<pubDate>(.*?)<\/pubDate>/);
-                  const creatorMatch = itemMatch.match(/<dc:creator>(.*?)<\/dc:creator>/);
+                  // Try CDATA patterns first
+                  let titleMatch = itemMatch.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/s);
+                  let linkMatch = itemMatch.match(/<link>(.*?)<\/link>/s);
+                  let descMatch = itemMatch.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/s);
+                  let dateMatch = itemMatch.match(/<pubDate>(.*?)<\/pubDate>/s);
+                  let creatorMatch = itemMatch.match(/<dc:creator>(.*?)<\/dc:creator>/s);
+                  
+                  // Fallback to non-CDATA patterns
+                  if (!titleMatch) {
+                    titleMatch = itemMatch.match(/<title>(.*?)<\/title>/s);
+                  }
+                  if (!descMatch) {
+                    descMatch = itemMatch.match(/<description>(.*?)<\/description>/s);
+                  }
                   
                   if (titleMatch && linkMatch) {
+                    const title = titleMatch[1]?.trim() || 'Unknown Event';
+                    const link = linkMatch[1]?.trim() || '';
+                    const description = descMatch ? descMatch[1]?.replace(/<[^>]*>/g, '').trim() : '';
+                    const date = dateMatch ? dateMatch[1]?.trim() : '';
+                    const creator = creatorMatch ? creatorMatch[1]?.trim() : '';
+                    
                     events.push({
-                      id: linkMatch[1],
-                      title: titleMatch[1],
-                      text: `${titleMatch[1]}\n\nAuthor: ${creatorMatch ? creatorMatch[1] : 'Unknown'}\nDate: ${dateMatch ? dateMatch[1] : 'Unknown'}\n\n${descMatch ? descMatch[1].replace(/<[^>]*>/g, '') : ''}`,
-                      url: linkMatch[1],
+                      id: link || `event-${events.length}`,
+                      title,
+                      text: `${title}\n\nAuthor: ${creator || 'Unknown'}\nDate: ${date || 'Unknown'}\n\n${description || 'No description available'}`,
+                      url: link,
                       metadata: {
-                        date: dateMatch ? dateMatch[1] : '',
-                        author: creatorMatch ? creatorMatch[1] : '',
-                        description: descMatch ? descMatch[1].replace(/<[^>]*>/g, '') : '',
+                        date,
+                        author: creator,
+                        description,
                       },
                     });
                   }
@@ -773,6 +826,8 @@ async function handleMcpRequest(request: any): Promise<any> {
               result = {
                 results: [],
                 error: error instanceof Error ? error.message : 'Unknown error',
+                daysBack: days,
+                timelineUrl: 'https://core.trac.wordpress.org/timeline',
               };
             }
             break;
@@ -790,11 +845,22 @@ async function handleMcpRequest(request: any): Promise<any> {
               queryUrl.searchParams.set('format', 'csv');
               queryUrl.searchParams.set('max', '1000'); // Get more tickets for better coverage
               
-              const response = await fetch(queryUrl.toString());
+              const response = await fetch(queryUrl.toString(), {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (compatible; WordPress-Trac-MCP-Server/1.0)',
+                  'Accept': 'text/csv,text/plain,*/*',
+                  'Accept-Language': 'en-US,en;q=0.9',
+                }
+              });
+              
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+              }
+              
               const csvData = await response.text();
               
               // Parse CSV data
-              const lines = csvData.trim().split('\n');
+              const lines = csvData.replace(/^\uFEFF/, '').trim().split('\n');
               const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
               
               // Find the column index for the requested type
@@ -825,12 +891,55 @@ async function handleMcpRequest(request: any): Promise<any> {
               }
               
               if (columnIndex === -1) {
-                throw new Error(`Column not found for type: ${type}`);
+                throw new Error(`Column not found for type: ${type}. Available columns: ${headers.join(', ')}`);
               }
               
-              // Extract unique values
+              // Extract unique values using better CSV parsing
               for (let i = 1; i < lines.length; i++) {
-                const values = lines[i].split(',').map(v => v.replace(/"/g, '').trim());
+                const line = lines[i].trim();
+                if (!line) continue;
+                
+                // Better CSV parsing - handle quoted fields properly
+                const values = [];
+                let currentField = '';
+                let inQuotes = false;
+                let escapeNext = false;
+                
+                for (let j = 0; j < line.length; j++) {
+                  const char = line[j];
+                  
+                  if (escapeNext) {
+                    currentField += char;
+                    escapeNext = false;
+                    continue;
+                  }
+                  
+                  if (char === '\\') {
+                    escapeNext = true;
+                    continue;
+                  }
+                  
+                  if (char === '"') {
+                    if (inQuotes) {
+                      // Check if this is an escaped quote
+                      if (j + 1 < line.length && line[j + 1] === '"') {
+                        currentField += '"';
+                        j++; // Skip the next quote
+                      } else {
+                        inQuotes = false;
+                      }
+                    } else {
+                      inQuotes = true;
+                    }
+                  } else if (char === ',' && !inQuotes) {
+                    values.push(currentField.trim());
+                    currentField = '';
+                  } else {
+                    currentField += char;
+                  }
+                }
+                values.push(currentField.trim());
+                
                 if (values[columnIndex] && values[columnIndex].trim()) {
                   uniqueValues.add(values[columnIndex].trim());
                 }
