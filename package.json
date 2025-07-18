@@ -30,6 +30,7 @@
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@vercel/og": "^0.7.2",
     "agents": "^0.0.108",
     "zod": "^3.22.4"
   },
