@@ -4,6 +4,10 @@ A Model Context Protocol (MCP) server that provides AI assistants with comprehen
 
 **🆕 Now with ChatGPT Deep Research support!**
 
+<a href="https://glama.ai/mcp/servers/@Jameswlepage/trac-mcp">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@Jameswlepage/trac-mcp/badge" alt="WordPress Trac Server MCP server" />
+</a>
+
 ## Overview
 
 This MCP server transforms WordPress Trac into an AI-accessible knowledge base, enabling intelligent queries about WordPress development, ticket tracking, and code changes. Features dual architecture supporting both standard MCP clients and ChatGPT's Deep Research requirements.
